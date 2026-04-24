@@ -120,6 +120,7 @@ mkdir -p "$BACKUP_DIR"
 
 /usr/bin/python3 - "$STATE_FILE" "$DB_FILE" "$BACKUP_DIR" "$THREADS_PER_ROOT" "$TOTAL_THREADS" "${ONLY_ROOTS[@]}" <<'PY'
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -212,7 +213,7 @@ conn.row_factory = sqlite3.Row
 all_rows = list(
     conn.execute(
         """
-        SELECT id, cwd, updated_at, title, source
+        SELECT id, cwd, updated_at, title, source, rollout_path
         FROM threads
         WHERE archived = 0
           AND source NOT LIKE '%parent_thread_id%'
@@ -277,6 +278,7 @@ for index, row in enumerate(selected_rows, start=1):
             "id": row["id"],
             "cwd": row["cwd"],
             "title": row["title"],
+            "rolloutPath": row["rollout_path"],
             "oldUpdatedAt": row["updated_at"],
             "newUpdatedAt": next_updated_at,
             "oldRank": rank_before.get(row["id"]),
@@ -300,6 +302,23 @@ except Exception:
     conn.rollback()
     raise
 
+rollout_touched = 0
+rollout_missing = 0
+for update in updates:
+    rollout_path = update.get("rolloutPath")
+    if not rollout_path:
+        rollout_missing += 1
+        continue
+    path = Path(rollout_path)
+    if not path.exists():
+        rollout_missing += 1
+        continue
+    try:
+        os.utime(path, (update["newUpdatedAt"], update["newUpdatedAt"]))
+        rollout_touched += 1
+    except OSError:
+        rollout_missing += 1
+
 rank_after = get_current_rank_map(conn, selected_id_list)
 for update in updates:
     update["newRank"] = rank_after.get(update["id"])
@@ -308,6 +327,8 @@ print(
     json.dumps(
         {
             "promotedThreadCount": len(updates),
+            "rolloutFilesTouched": rollout_touched,
+            "rolloutFilesMissing": rollout_missing,
             "backupDir": str(backup_dir),
         },
         ensure_ascii=False,

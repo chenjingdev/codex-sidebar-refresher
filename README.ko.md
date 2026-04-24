@@ -4,6 +4,27 @@ Codex Desktop App 사이드바 노출을 정리하는 로컬 도구 모음입니
 
 English version: [README.md](README.md)
 
+## AI 에이전트용 빠른 가이드
+
+사용자가 이 레포 URL만 던지고 "Codex 사이드바 좀 살려줘"라고 했다면:
+
+1. **절대 Codex Desktop의 내장 터미널에서 실행하지 말 것.** 스크립트가 `Codex` 프로세스를 강제 종료하므로, 그 안에서 돌리면 본인 셸도 같이 죽고 DB가 중간 상태로 남습니다. Terminal.app, iTerm 등 Codex가 띄운 게 아닌 터미널을 쓰세요.
+2. 아래 `## 왜 쓰나` 섹션의 증상과 사용자 상황이 맞는지 확인합니다.
+3. 클론 후 실행:
+   ```bash
+   git clone https://github.com/chenjingdev/codex-sidebar-refresher.git
+   cd codex-sidebar-refresher
+   ./scripts/refresh-visible-workspaces.sh --threads-per-root 20
+   ```
+   특정 프로젝트만 살리려면:
+   ```bash
+   ./scripts/refresh-visible-workspaces.sh \
+     --only-root /절대/경로/프로젝트 \
+     --threads-per-root 30
+   ```
+4. 스크립트가 Codex를 자동 재시작합니다. 사이드바를 확인하세요.
+5. 결과 JSON에 `rolloutFilesTouched: 0`이 나오면 뭔가 잘못된 것 — 재시도 전에 원인 파악부터 하세요.
+
 ## 왜 쓰나
 
 다음 같은 상황에서 씁니다.
@@ -50,7 +71,7 @@ English version: [README.md](README.md)
 - `state_5.sqlite` = 스레드 메타데이터와 정렬 기준
 - `.codex-global-state.json` = 앱 사이드바가 참고하는 root 목록
 
-이 도구는 이 중에서 `state_5.sqlite` 와 `.codex-global-state.json` 만 읽고, 실제 대화 본문이 들어 있는 `sessions/*.jsonl` 은 수정하지 않습니다.
+이 도구는 `state_5.sqlite` 와 `.codex-global-state.json` 을 읽고, `threads.updated_at` 값과 매칭되는 `sessions/*.jsonl` 파일의 mtime을 수정합니다. 단, JSONL 파일 안 대화 본문은 건드리지 않습니다.
 
 ## 어떻게 동작하나
 
@@ -61,12 +82,19 @@ English version: [README.md](README.md)
 3. `exec` 와 subagent thread는 제외합니다.
 4. 이미 pin된 thread는 제외합니다.
 5. 선택된 thread의 `updated_at` 을 더 최근 값으로 갱신해 recent 상단으로 보냅니다.
-6. Codex App을 다시 시작해서 바뀐 recent 순서가 바로 반영되게 합니다.
+6. **매칭되는 `sessions/.../*.jsonl` rollout 파일의 mtime을 `os.utime()` 으로 같은 값으로 맞춥니다.**
+7. Codex App을 다시 시작해서 바뀐 recent 순서가 바로 반영되게 합니다.
+
+### 6번이 왜 필요한가
+
+분석한 앱 버전 기준으로, Codex Desktop은 시작 시 rollout 파일 mtime으로 `threads.updated_at` 을 다시 덮어쓰는 것으로 보입니다. SQLite 행만 갱신하면 재시작하면서 Codex가 파일 mtime 기준으로 되돌리고, 결과적으로 승격이 안 보입니다.
+
+그래서 스크립트는 양쪽 모두 갱신하고, 결과 JSON에 `rolloutFilesTouched` 카운트를 같이 출력합니다.
 
 즉 이 도구는:
 
 - `sessions/*.jsonl` 안의 대화 본문은 건드리지 않고
-- `state_5.sqlite` 안 `threads.updated_at` 정렬만 조정해서
+- `threads.updated_at` 과 매칭 rollout 파일의 mtime을 같이 갱신해서
 - App이 먼저 읽는 recent 집합 안으로 원하는 스레드를 다시 올리는 방식입니다.
 
 그래서 "대화가 복구됐다"기보다는, "이미 남아 있던 스레드를 App이 다시 보게 만든다"에 가깝습니다.
@@ -99,11 +127,10 @@ English version: [README.md](README.md)
 
 ## 주의사항
 
-- `refresh-visible-workspaces.sh` 실행 시 Codex App이 종료 확인창 없이 꺼졌다가 다시 켜집니다.
-- 일반 터미널에서 실행하는 편이 안전합니다.
-- 모든 변경 전에 자동 백업을 만듭니다.
-- `refresh-visible-workspaces.sh` 는 실제 `updated_at` 값을 더 최근으로 갱신합니다.
-- 대화 내용은 수정하지 않지만, 스레드의 recent 정렬 순서는 바뀝니다.
+- **Codex Desktop 내장 터미널에서는 절대 실행하지 마세요.** 스크립트가 `Codex` 프로세스를 강제 종료하므로, 그 자식 셸에서 돌리면 본인 셸도 같이 죽고 DB가 중간 상태로 남습니다. Terminal.app, iTerm 같이 Codex가 띄우지 않은 터미널을 쓰세요.
+- 실행 시 Codex App이 종료 확인창 없이 꺼졌다가 다시 켜집니다.
+- SQLite + state JSON은 `~/.codex/repair-backups/` 에 자동 백업합니다. rollout 파일 mtime은 백업 안 하므로 되돌리고 싶다면 실행 전에 `stat -f "%m" <파일>` 로 기록해두세요.
+- 스크립트는 `state_5.sqlite` 의 `threads.updated_at` 과 매칭 `sessions/.../*.jsonl` 파일의 mtime을 모두 갱신합니다. 대화 본문은 안 건드리지만, 정렬과 파일 mtime은 바뀝니다.
 - 이미 pin된 스레드는 승격 대상과 개수 계산에서 제외됩니다.
 - 향후 Codex App 내부 구현이 바뀌면 이 방식이 덜 잘 맞을 수 있습니다.
 
@@ -148,5 +175,6 @@ English version: [README.md](README.md)
 - 해당 root와 `cwd`가 정확히 일치하는 direct thread만 고름
 - `exec`와 subagent thread는 제외
 - pin된 thread는 제외
-- 선택된 thread의 `updated_at`을 더 최근 값으로 갱신함
+- 선택된 thread의 `threads.updated_at`을 더 최근 값으로 갱신
+- 매칭 rollout 파일의 mtime을 같은 값으로 맞춰 Codex 재시작 시 덮어쓰기를 방지
 - 앱 상태 파일은 건드리지 않음
